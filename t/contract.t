@@ -237,6 +237,18 @@ use strict;
 use warnings;
 
 use Test::Most;
+
+# Everything the runner has to read arrives on one stream.  The diagnostics the
+# checks leave behind go through Test::Builder, which keeps a stream of its own
+# for them unless it is told otherwise, and anything written straight to STDERR
+# is merged into stdout as well.  The runner used to ask the shell for this with
+# "2>&1"; the redirection is done here instead, because a shell is the one thing
+# that is not portable - the shell on Windows does not know the quoting a POSIX
+# shell would, which is what used to break this suite there.
+Test::More->builder->output(\\*STDOUT);
+Test::More->builder->failure_output(\\*STDOUT);
+open(STDERR, '>&', \\*STDOUT) or die "cannot send stderr to stdout: \$!";
+
 use Test::Consumer::Contract qw(run_consumer_contract);
 
 my \$spec = $dumped;
@@ -248,9 +260,15 @@ SCRIPT
 
 	my $path = _write($dir, 'Widget-Contract/t/contract.t', $script);
 
-	my $command = join(' ', map { my $a = $_; $a =~ s/'/'"'"'/g; "'$a'" } ($^X, "-I$HELPER_LIB", $path))
-		. ' 2>&1';
-	open(my $fh, '-|', $command) or die "Cannot run $command: $!";
+	# perl, the include path and the fixture test as separate arguments: no shell,
+	# so nothing here rests on quoting that differs between platforms.  A
+	# single-string open is run by the platform's shell, and the shell on Windows
+	# is cmd.exe, which does not know what a POSIX single quote is: the quote
+	# marks became part of the file name and every subtest saw "The filename,
+	# directory name, or volume label syntax is incorrect." rather than a check.
+	# The fixture sends its own diagnostics to stdout (see the script above), so
+	# one stream is still what comes back.
+	open(my $fh, '-|', $^X, "-I$HELPER_LIB", $path) or die "Cannot run $^X: $!";
 	local $/;
 	my $output = <$fh> // '';
 	close($fh);

@@ -1,6 +1,17 @@
 Revision history for Test::Consumer::Contract
 
 0.02	2026-10-16
+	- The end-to-end tests run their fixtures without a shell, so the suite passes
+	  on Windows.  t/contract.t built one command string with POSIX quoting and a
+	  "2>&1" on the end, and a single-string open is run by the platform's shell:
+	  cmd.exe does not know what a POSIX single quote is, so the whole command
+	  became one invalid file name and every subtest read "The filename, directory
+	  name, or volume label syntax is incorrect." instead of the check it was
+	  asserting on.  The interpreter, the include path and the fixture test are
+	  now passed as separate arguments, and the fixture test puts everything the
+	  runner has to read on one stream itself - Test::Builder's own diagnostic
+	  stream is pointed at stdout and STDERR is merged into it - which is what the
+	  shell's redirection used to do for it.
 	- The accessor check now runs in both directions.  It already required every
 	  documented accessor the contract names to exist on the value object; it now
 	  also requires every accessor the value object documents - its =head2 (and
