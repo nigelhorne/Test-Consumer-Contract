@@ -1,0 +1,8 @@
+Changes
+lib/Test/Consumer/Contract.pm
+Makefile.PL
+MANIFEST
+README.md
+t/00-load.t
+t/contract.t
+t/scanner.t

@@ -1,0 +1,28 @@
+Revision history for Test::Consumer::Contract
+
+0.02	2026-10-16
+	- The accessor check now runs in both directions.  It already required every
+	  documented accessor the contract names to exist on the value object; it now
+	  also requires every accessor the value object documents - its =head2 (and
+	  deeper) headings and its public subs - to be accounted for in 'accessors',
+	  'not_accessors' or 'conditional', failing with the name and the three places
+	  it could belong.  A value object that gains a documented accessor therefore
+	  fails the contract until the declaration says what kind of accessor it is,
+	  instead of the declaration being left behind - and a consumer that reads the
+	  new accessor passing check 2 under a contract that never mentioned it.
+	- New option 'not_accessors': documented accessors of the value object that
+	  are not a slot of one result (a constructor, a class constant), as
+	  name => why.  An entry the value object does not document fails, as an entry
+	  in 'accessors' does.
+	- New method documented_accessors(), the names the value object documents, so
+	  a declaration can be checked from outside the module.
+	- t/contract.t gains the scenarios that prove the new direction bites: a value
+	  object that gains a documented accessor (implemented, and documented only,
+	  through AUTOLOAD), the same accessor accounted for in 'not_accessors' and in
+	  'conditional', and a name the value object no longer documents.
+
+0.01	2026-10-15
+	- First version, lifted from the reader/producer contract that lived inside
+	  Geo-Coder-Free/t/consumer-contract.t, so any distribution in the workspace
+	  can declare its producer keys and registered consumers and get the same
+	  three checks.
