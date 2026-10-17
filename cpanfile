@@ -13,6 +13,7 @@ on 'test' => sub {
 	requires 'Data::Dumper';
 	requires 'File::Path';
 	requires 'File::Temp';
+	requires 'Test::DescribeMe';
 	requires 'Test::Most';
 };
 

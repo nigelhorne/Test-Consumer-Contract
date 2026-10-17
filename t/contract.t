@@ -162,6 +162,39 @@ sub show
 1;
 PERL
 
+# A platform whose paths use '\', emulated on any platform: File::Spec->abs2rel()
+# answers the way File::Spec::Win32 does, and File::Spec->catfile() reads a '\'
+# as a separator, as it does there.  Every path the declaration writes - and so
+# every path the checks look a file up by, and report it under - is spelled with
+# '/', so a path taken straight from abs2rel() matches no registry key and no
+# ignored rule, and every consumer is reported as unregistered.  That is what
+# Windows CI caught, and it is why these tests can assert it without Windows.
+my $WINDOWS_SEPARATORS = <<'PERL';
+package WinSep;
+
+use File::Spec;
+
+my $abs2rel = File::Spec->can('abs2rel');
+my $catfile = File::Spec->can('catfile');
+
+no warnings 'redefine';
+
+*File::Spec::abs2rel = sub {
+	my $rel = $abs2rel->(@_);
+	$rel =~ s{/}{\\}g;
+
+	return $rel;
+};
+
+*File::Spec::catfile = sub {
+	my @parts = map { my $part = $_; $part =~ s{\\}{/}g; $part } @_;
+
+	return $catfile->(@parts);
+};
+
+1;
+PERL
+
 my %BASE_DECLARATION = (
 	source              => 'Widget::Maker',
 	include             => ['Widget-Maker/lib'],
@@ -223,19 +256,36 @@ sub _fixture
 }
 
 # The declaration, written out as the test a second distribution would have.
+# windows_separators is not part of the declaration: it puts the shim above on
+# the fixture's include path and loads it before the module under test.
 sub _check
 {
 	my ($dir, %declaration) = @_;
 
+	my $windows_separators = delete $declaration{'windows_separators'};
+
 	my %spec = (%BASE_DECLARATION, %declaration);
 
 	my $dumped = Data::Dumper->new([\%spec])->Terse(1)->Sortkeys(1)->Dump();
+
+	my @include = ("-I$HELPER_LIB");
+	my $preload = '';
+	if($windows_separators) {
+		# In a directory of its own rather than in the fixture: the fixture is the
+		# workspace the checks scan, and a shim dropped in it would be a sibling
+		# distribution that the scenarios below did not ask for.
+		my $shim = tempdir(CLEANUP => 1);
+		_write($shim, 'WinSep/lib/WinSep.pm', $WINDOWS_SEPARATORS);
+		push @include, '-I' . File::Spec->catdir($shim, 'WinSep', 'lib');
+		$preload = "use WinSep;\n";
+	}
 
 	my $script = <<"SCRIPT";
 #!perl -w
 use strict;
 use warnings;
 
+$preload
 use Test::Most;
 
 # Everything the runner has to read arrives on one stream.  The diagnostics the
@@ -268,7 +318,7 @@ SCRIPT
 	# directory name, or volume label syntax is incorrect." rather than a check.
 	# The fixture sends its own diagnostics to stdout (see the script above), so
 	# one stream is still what comes back.
-	open(my $fh, '-|', $^X, "-I$HELPER_LIB", $path) or die "Cannot run $^X: $!";
+	open(my $fh, '-|', $^X, @include, $path) or die "Cannot run $^X: $!";
 	local $/;
 	my $output = <$fh> // '';
 	close($fh);
@@ -447,6 +497,37 @@ subtest 'an ignored file is not reported as an unregistered consumer' => sub {
 	}), ignored => [
 		['Widget-User/lib/Widget/Stray.pm', 'a demo that is not part of the contract'],
 	]);
+
+	is($status, 0, 'the ignored file was left alone') or diag($output);
+	is(scalar(_passed($output)), 3, 'all three checks ran and passed') or diag($output);
+};
+
+subtest 'the checks hold on a platform whose paths use backslashes' => sub {
+	my ($status, $output) = _check(_fixture({}), windows_separators => 1);
+
+	is($status, 0, 'the contract passed') or diag($output);
+	is(scalar(_passed($output)), 3, 'all three checks ran and passed') or diag($output);
+	unlike($output, qr/\\/, 'and nothing they report carries a platform separator')
+		or diag($output);
+};
+
+subtest 'and a consumer is named the way the contract names files' => sub {
+	my ($status, $output) = _check(_fixture({
+		'Widget-User/lib/Widget/Stray.pm' => $STRAY_CONSUMER,
+	}), windows_separators => 1);
+
+	isnt($status, 0, 'the contract failed');
+	like($output, qr/Widget-User\/lib\/Widget\/Stray\.pm/, 'the unregistered file is named with /')
+		or diag($output);
+	_no_other_failures($output, $CHECKS[2]);
+};
+
+subtest 'and an ignored rule written with / still matches' => sub {
+	my ($status, $output) = _check(_fixture({
+		'Widget-User/lib/Widget/Stray.pm' => $STRAY_CONSUMER,
+	}), ignored => [
+		['Widget-User/lib/Widget/Stray.pm', 'a demo that is not part of the contract'],
+	], windows_separators => 1);
 
 	is($status, 0, 'the ignored file was left alone') or diag($output);
 	is(scalar(_passed($output)), 3, 'all three checks ran and passed') or diag($output);

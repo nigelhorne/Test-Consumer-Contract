@@ -30,6 +30,7 @@ WriteMakefile(
 		'Data::Dumper' => 0,
 		'File::Path' => 0,
 		'File::Temp' => 0,
+		'Test::DescribeMe' => 0,
 		'Test::Most' => 0,
 	},
 	dist => $dist,

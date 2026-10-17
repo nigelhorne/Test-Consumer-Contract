@@ -100,6 +100,13 @@ required; every other option has a default:
     The directory holding the sibling distributions.  Defaults to the parent of
     `dist_root`.
 
+    Every path in a declaration - in `include`, `producers`,
+    `workspace_producers`, `consumers` and `ignored` - is written with `/`
+    between the directories, whatever separator the platform itself uses, and the
+    paths in `consumers` and `ignored` are relative to the workspace.  The checks
+    name files the same way, so a path can be copied from a failure message into the
+    declaration unchanged.
+
 - `include`
 
     Workspace-relative lib directories to put at the front of `@INC`, so a value

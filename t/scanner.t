@@ -1,9 +1,9 @@
 #!/usr/bin/env perl
 
 # Unit tests for the parts of the contract checker that read source: which
-# variables hold a result, what a read of one looks like, and how a producer's
-# assignment is recognised.  The three checks themselves are exercised end to
-# end in t/contract.t.
+# variables hold a result, what a read of one looks like, how a producer's
+# assignment is recognised, and which directories it walks past.  The three
+# checks themselves are exercised end to end in t/contract.t.
 
 use strict;
 use warnings;
@@ -90,6 +90,18 @@ subtest 'the spellings that count as a producer setting a key' => sub {
 	ok(!$contract->sets_key("my \$colour = 'red'", 'colour'), 'a lexical is not the key');
 	ok(!$contract->sets_key("colourblind => 1", 'colour'), 'a longer key is not the key');
 	ok(!$contract->sets_key('$widget->colour()', 'colour'), 'calling an accessor is not setting the key');
+};
+
+subtest 'a path is judged the same whatever separator it is written with' => sub {
+	ok($contract->_skipped_dir('/ws/Widget-User/blib'), 'a POSIX path to a build product is walked past');
+	ok($contract->_skipped_dir('C:\\ws\\Widget-User\\blib'), 'and the Windows path to one, which used to be walked into');
+	ok($contract->_skipped_dir('C:\\ws\\Widget-User\\.git'), 'a nested version control tree is walked past');
+	ok(!$contract->_skipped_dir('C:\\ws\\Widget-User\\lib'), 'an ordinary directory is not');
+
+	is($contract->_ported('Widget-User\\lib\\Widget\\User.pm'), 'Widget-User/lib/Widget/User.pm',
+		'a platform path is spelled the way the contract spells files');
+	is($contract->_ported('Widget-User/lib/Widget/User.pm'), 'Widget-User/lib/Widget/User.pm',
+		'and one already spelled that way is left alone');
 };
 
 subtest 'a bare statement is not mistaken for a bound result' => sub {

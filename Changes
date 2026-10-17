@@ -1,6 +1,27 @@
 Revision history for Test::Consumer::Contract
 
 0.02	2026-10-16
+	- Paths are no longer taken from the platform when the workspace is scanned.
+	  File::Spec->abs2rel() answers with '\' on Windows while every registry key,
+	  ignored rule and failure message names files with '/', so the discovered
+	  path matched no consumer in the declaration and every consumer was reported
+	  as unregistered - check 3 failed on Windows for a contract that holds.  The
+	  paths the scan reports are now spelled the way the declaration spells them,
+	  on every platform.  The directories the scan walks past were matched with
+	  '/' alone, so on Windows they were not walked past at all and the files
+	  scanned were the platform's choice rather than the contract's; the name is
+	  now matched at a boundary of either separator.  t/scanner.t holds the
+	  spellings to each other and t/contract.t runs the three checks against a
+	  workspace whose paths use '\', so neither failure can come back on a platform
+	  the suite is not run on.
+	- t/changes-version.t, an author test that the version in the newest Changes
+	  entry is the version every module under lib/ declares.  A release is two
+	  edits - the $VERSION and a heading - and the heading is the one that gets
+	  forgotten, so this fails with both numbers named instead of letting a
+	  version be uploaded with no note to say what changed in it.  It runs with
+	  AUTHOR_TESTING=1, as the other author tests do, and each module is loaded
+	  and asked for its $VERSION rather than read for one, so a commented-out
+	  assignment cannot pass for a declaration.
 	- The end-to-end tests run their fixtures without a shell, so the suite passes
 	  on Windows.  t/contract.t built one command string with POSIX quoting and a
 	  "2>&1" on the end, and a single-string open is run by the platform's shell:

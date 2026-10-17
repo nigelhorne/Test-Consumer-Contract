@@ -134,6 +134,13 @@ is not a distribution root.
 The directory holding the sibling distributions.  Defaults to the parent of
 C<dist_root>.
 
+Every path in a declaration - in C<include>, C<producers>,
+C<workspace_producers>, C<consumers> and C<ignored> - is written with C</>
+between the directories, whatever separator the platform itself uses, and the
+paths in C<consumers> and C<ignored> are relative to the workspace.  The checks
+name files the same way, so a path can be copied from a failure message into the
+declaration unchanged.
+
 =item C<include>
 
 Workspace-relative lib directories to put at the front of C<@INC>, so a value
@@ -682,17 +689,43 @@ sub _workspace_sources
 				no_chdir => 1,
 				wanted   => sub {
 					my $path = $File::Find::name;
-					$File::Find::prune = 1
-						if(-d $path && $path =~ m{/(?:blib|xt|inc|local|node_modules|\.git|\.build)$});
+					$File::Find::prune = 1 if(-d $path && $self->_skipped_dir($path));
 					return unless -f $path;
 					return unless $path =~ /\.(?:pm|t|pl|PL|pm6)$/;
-					push @files, File::Spec->abs2rel($path, $self->{'workspace'});
+					push @files, $self->_ported(File::Spec->abs2rel($path, $self->{'workspace'}));
 				},
 			}, $root);
 		}
 	}
 
 	return @files;
+}
+
+# A path spelled the way the contract spells paths: relative to the workspace,
+# with '/' between the directories whatever the platform uses itself.  Every
+# registry key, ignored rule and failure message is written that way, while
+# File::Spec->abs2rel() answers with '\' on Windows - passed through unchanged it
+# matches none of them, and every consumer is then reported as unregistered.
+sub _ported
+{
+	my (undef, $path) = @_;
+
+	$path =~ s{\\}{/}g;
+
+	return $path;
+}
+
+# Directories holding something other than this checkout's source - a build
+# product, a bundled copy of a dependency, another version control tree - are not
+# descended into.  The name is matched at a separator boundary of either
+# spelling, because File::Find names files the platform's way and a '/' never
+# appears in a Windows path: matched as only '/', this pruned nothing there and
+# the files scanned were the platform's choice rather than the contract's.
+sub _skipped_dir
+{
+	my (undef, $path) = @_;
+
+	return $path =~ m{[/\\](?:blib|xt|inc|local|node_modules|\.git|\.build)$} ? 1 : 0;
 }
 
 sub _ignored
