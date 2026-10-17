@@ -104,7 +104,7 @@ use File::Spec;
 
 our @EXPORT_OK = qw(run_consumer_contract);
 
-our $VERSION = '0.02';
+our $VERSION = '0.01';
 
 # ---------------------------------------------------------------------------
 # The contract
