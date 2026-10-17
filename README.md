@@ -59,7 +59,9 @@ Then it runs these checks:
 
     Files in sibling distributions that receive a result but are named in neither
     `consumers` nor `ignored` fail the check, so a new consumer cannot slip past
-    check 2 unnoticed.
+    check 2 unnoticed.  A consumer is not necessarily a module: a program without an
+    extension is discovered too, when it starts with a shebang, because a script can
+    hold the same reader as the module beside it.
 
 - 4. the accessor lists match the value object, in both directions
 
@@ -132,9 +134,20 @@ required; every other option has a default:
 
 - `methods`
 
-    The calls that hand a result to the caller; `geocode` and `reverse_geocode` by
-    default.  A variable bound from one of these is followed, as is a variable passed
-    to a sub as its first parameter.
+    The calls that hand a result to the caller; `geocode`, `reverse_geocode` and
+    `geocode_many` by default.  A variable bound from one of these is followed, as
+    is a variable passed to a sub as its first parameter.
+
+    `geocode_many` returns a batch rather than one result: its keys are the results,
+    plus counts about the batch itself.  A variable bound from a batch method is
+    therefore not treated as a result - `$batch->{'lookups'}` is not a read of
+    one - while `my $point = $batch->{$value}` makes `$point` a result, so the
+    reads off it are checked like any other consumer's.
+
+- `batch_methods`
+
+    The producing methods that return a batch of results rather than one result;
+    `geocode_many` by default.  A variable bound from one is a batch, not a result.
 
 - `require_workspace`
 
@@ -211,6 +224,9 @@ stored in a hash, returned, or passed through two helpers is not followed.
 - Discovery requires the file to name the source distribution.  A consumer
 that is handed results without naming the distribution is not picked up; add it
 to `consumers` by hand.
+- Extensionless files are discovered by their shebang.  A program without
+one - a compiled binary, a file run through an explicit interpreter - is not
+seen; register it by hand.
 - Files in the `dist_root` distribution are not scanned for consumption -
 its own sources are treated as the producer.  A consumer that lives in the
 producing distribution is not discovered.

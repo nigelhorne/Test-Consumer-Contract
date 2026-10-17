@@ -169,6 +169,83 @@ PERL
 # '/', so a path taken straight from abs2rel() matches no registry key and no
 # ignored rule, and every consumer is reported as unregistered.  That is what
 # Windows CI caught, and it is why these tests can assert it without Windows.
+# The producer can also answer a batch.  geocode_many() hands back one hashref
+# holding the results under their values and counts about the batch beside
+# them - the shape Geo::Coder::Free::geocode_many() has - so a reader of it is a
+# reader of results even though the variable it binds is not itself a result.
+my $BATCH_METHOD = <<'PERL';
+# The batch spelling of geocode(): one hashref, the results under their values.
+sub geocode_many
+{
+	my ($self, $values) = @_;
+
+	my %batch = (lookups => 0, resolved => 0, unresolved => 0);
+	for my $value (@{$values}) {
+		my $widget = $self->geocode(location => $value);
+		$batch{'lookups'}++;
+		if ($widget) {
+			$batch{$value} = $widget;
+			$batch{'resolved'}++;
+		} else {
+			$batch{'unresolved'}++;
+		}
+	}
+
+	return \%batch;
+}
+
+1;
+PERL
+
+my $PRODUCER_WITH_BATCH = $PRODUCER;
+$PRODUCER_WITH_BATCH =~ s/^1;$/$BATCH_METHOD/m;
+
+# A consumer of a batch: it reads the batch's own counts, then takes a result
+# out of it and reads the result.
+my $BATCH_CONSUMER = <<'PERL';
+package Widget::Batch;
+
+use Widget::Maker;
+
+sub show
+{
+	my ($self, $maker, $name) = @_;
+
+	my $batch = $maker->geocode_many([$name]);
+	return 'none' unless $batch->{'lookups'};
+
+	my $widget = (ref($batch) eq 'HASH') ? $batch->{$name} : undef;
+	return unless $widget;
+
+	return $widget->{'x'} . ',' . $widget->{'y'};
+}
+
+1;
+PERL
+
+# The same consumer after it started reading a key only some paths set.
+my $BATCH_CONSUMER_READING_COLOUR = $BATCH_CONSUMER;
+$BATCH_CONSUMER_READING_COLOUR =~ s/return \$widget->\{'x'\} \. ',' \. \$widget->\{'y'\};/return \$widget->{'x'} . \$widget->{'colour'};/;
+
+# An extensionless program, of the kind the scanner used to walk past: a script
+# is not a module and does not need a .pm to hold the same reader.
+my $PROGRAM = <<'PERL';
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+
+use Widget::Maker;
+
+my $maker  = Widget::Maker->new();
+my $widget = $maker->geocode(location => 'London');
+
+print $widget->{'x'}, ',', $widget->{'y'}, "\n";
+PERL
+
+my $PROGRAM_READING_COLOUR = $PROGRAM;
+$PROGRAM_READING_COLOUR =~ s/print \$widget->\{'x'\}, ',', \$widget->\{'y'\}, "\\n";/print \$widget->{'x'}, ',', \$widget->{'colour'}, "\\n";/;
+
 my $WINDOWS_SEPARATORS = <<'PERL';
 package WinSep;
 
@@ -193,6 +270,39 @@ no warnings 'redefine';
 };
 
 1;
+PERL
+
+# The two capabilities this version added, taken away again the way the checker
+# had them before.  A mutation is run in the fixture subprocess after the
+# checker is loaded, so a scenario that only fails because of the capability is
+# shown to pass without it - the test's failure is not a coincidence of the
+# fixture.  These are mutations of the checker, not of the code under test.
+my $NO_SHEBANG_DISCOVERY = <<'PERL';
+# Before 0.02 a file with no extension was never a candidate.
+*Test::Consumer::Contract::_program = sub { return 0 };
+PERL
+
+# Two mutations of batch support, one for each half of it.  The batch is not
+# itself a result, so with the exemption removed its own counts are read as
+# fields of one.
+my $BATCH_IS_A_RESULT = <<'PERL';
+*Test::Consumer::Contract::_batch_methods_re = sub { qr/nothing_matches_this/ };
+PERL
+
+# Before 0.02 geocode_many() was neither a producing method nor a batch, so a
+# variable bound from it was not a result, and neither was a value taken out of
+# it.  'nothing_matches_this' is a stand-in for the empty method list, which
+# would compile to a regex that matches everywhere.
+my $NO_BATCH_METHOD = <<'PERL';
+my $new = \&Test::Consumer::Contract::new;
+*Test::Consumer::Contract::new = sub {
+	my ($class, %spec) = @_;
+
+	$spec{'methods'}       //= [qw(geocode reverse_geocode)];
+	$spec{'batch_methods'} //= [qw(nothing_matches_this)];
+
+	return $new->($class, %spec);
+};
 PERL
 
 my %BASE_DECLARATION = (
@@ -263,6 +373,9 @@ sub _check
 	my ($dir, %declaration) = @_;
 
 	my $windows_separators = delete $declaration{'windows_separators'};
+	# A mutation of the checker itself; unlike the declaration, it is not part of
+	# what is dumped for the fixture to run.
+	my $mutation = delete $declaration{'mutation'};
 
 	my %spec = (%BASE_DECLARATION, %declaration);
 
@@ -279,6 +392,8 @@ sub _check
 		push @include, '-I' . File::Spec->catdir($shim, 'WinSep', 'lib');
 		$preload = "use WinSep;\n";
 	}
+
+	my $mutant = defined($mutation) ? "no warnings 'redefine';\n$mutation\n" : '';
 
 	my $script = <<"SCRIPT";
 #!perl -w
@@ -301,6 +416,7 @@ open(STDERR, '>&', \\*STDOUT) or die "cannot send stderr to stdout: \$!";
 
 use Test::Consumer::Contract qw(run_consumer_contract);
 
+$mutant
 my \$spec = $dumped;
 
 run_consumer_contract(%{\$spec});
@@ -540,6 +656,148 @@ subtest 'the workspace checks skip when the siblings are not there' => sub {
 	is(scalar(_passed($output)), 1, 'the producer check ran') or diag($output);
 	like($output, qr/sibling checkouts are not present \(No-Such-Distribution\)/,
 		'and the skip says which checkout is missing') or diag($output);
+};
+
+# ---------------------------------------------------------------------------
+# The two readers the scanner used to walk past: a program with no extension,
+# and a result taken out of a batch.
+# ---------------------------------------------------------------------------
+
+subtest 'an unregistered program in bin/ is discovered' => sub {
+	# Nothing in this fixture registers the program, and nothing in it reads a
+	# result except the program: without discovery by shebang the check would
+	# find no consumer to complain about and pass.
+	my ($status, $output) = _check(_fixture({
+		'Widget-User/bin/widget-map' => $PROGRAM,
+	}));
+
+	isnt($status, 0, 'the contract failed');
+	like($output, qr/unregistered consumers of Widget::Maker results:/,
+		'the check says what it found') or diag($output);
+	like($output, qr/Widget-User\/bin\/widget-map/, 'and names the program') or diag($output);
+	_no_other_failures($output, $CHECKS[2]);
+};
+
+subtest 'a bad read in an extensionless program is caught' => sub {
+	# A program at the distribution root, which is neither a module nor under
+	# bin/: ged2map is one, and its geocoding loop is a copy of a module's.
+	my ($status, $output) = _check(_fixture({
+		'Widget-User/map-events' => $PROGRAM_READING_COLOUR,
+	}), consumers => {
+		'Widget-User/lib/Widget/User.pm' => { may_rely_on => {} },
+		'Widget-User/map-events'      => { may_rely_on => {} },
+	});
+
+	isnt($status, 0, 'the contract failed');
+	like($output, qr/Widget-User\/map-events line \d+ in .*reads 'colour' \(key\) - only the painted path sets it/,
+		'the check names the program, line, sub, key and why') or diag($output);
+	_no_other_failures($output, $CHECKS[1]);
+};
+
+subtest 'an unregistered geocode_many consumer is discovered' => sub {
+	# The batch consumer's only reads are off a result taken out of the batch, so
+	# a scanner that does not follow geocode_many() sees no consumer at all.
+	my ($status, $output) = _check(_fixture({
+		'Widget-Maker/lib/Widget/Maker.pm' => $PRODUCER_WITH_BATCH,
+		'Widget-User/lib/Widget/Batch.pm'  => $BATCH_CONSUMER,
+	}));
+
+	isnt($status, 0, 'the contract failed');
+	like($output, qr/unregistered consumers of Widget::Maker results:/,
+		'the check says what it found') or diag($output);
+	like($output, qr/Widget-User\/lib\/Widget\/Batch\.pm/, 'and names the file') or diag($output);
+	_no_other_failures($output, $CHECKS[2]);
+};
+
+subtest 'a result taken out of a geocode_many batch is a result' => sub {
+	my ($status, $output) = _check(_fixture({
+		'Widget-Maker/lib/Widget/Maker.pm' => $PRODUCER_WITH_BATCH,
+		'Widget-User/lib/Widget/Batch.pm'  => $BATCH_CONSUMER,
+	}), consumers => {
+		'Widget-User/lib/Widget/User.pm'  => { may_rely_on => {} },
+		'Widget-User/lib/Widget/Batch.pm' => { may_rely_on => {} },
+	});
+
+	is($status, 0, 'the batch consumer passed') or diag($output);
+	is(scalar(_passed($output)), 3, 'all three checks ran and passed') or diag($output);
+};
+
+subtest 'a bad read of a result from a batch is caught' => sub {
+	my ($status, $output) = _check(_fixture({
+		'Widget-Maker/lib/Widget/Maker.pm' => $PRODUCER_WITH_BATCH,
+		'Widget-User/lib/Widget/Batch.pm'  => $BATCH_CONSUMER_READING_COLOUR,
+	}), consumers => {
+		'Widget-User/lib/Widget/User.pm'  => { may_rely_on => {} },
+		'Widget-User/lib/Widget/Batch.pm' => { may_rely_on => {} },
+	});
+
+	isnt($status, 0, 'the contract failed');
+	like($output, qr/Widget-User\/lib\/Widget\/Batch\.pm line \d+ in show\(\) reads 'colour' \(key\) - only the painted path sets it/,
+		'the check names the file, line, sub, key and why') or diag($output);
+	_no_other_failures($output, $CHECKS[1]);
+};
+
+# ---------------------------------------------------------------------------
+# The mutations that prove the two new failures above are caused by the two new
+# capabilities, rather than by the fixtures happening to be broken.
+# ---------------------------------------------------------------------------
+
+subtest 'mutation: without shebang discovery an unregistered program is invisible' => sub {
+	# Discovery is the whole of what finds an unregistered consumer: with the
+	# pre-0.02 extension filter back, the program is a file the workspace walk
+	# never asks about, and the register-it failure goes quiet.
+	my ($status, $output) = _check(_fixture({
+		'Widget-User/bin/widget-map' => $PROGRAM,
+	}), mutation => $NO_SHEBANG_DISCOVERY);
+
+	is($status, 0, 'an unregistered program is no longer seen') or diag($output);
+	is(scalar(_passed($output)), 3, 'all three checks pass') or diag($output);
+	unlike($output, qr/widget-map|unregistered consumers/,
+		'the program is never named') or diag($output);
+};
+
+subtest 'mutation: without batch support neither geocode_many failure is found' => sub {
+	my ($stray_status, $stray_output) = _check(_fixture({
+		'Widget-Maker/lib/Widget/Maker.pm' => $PRODUCER_WITH_BATCH,
+		'Widget-User/lib/Widget/Batch.pm'  => $BATCH_CONSUMER,
+	}), mutation => $NO_BATCH_METHOD);
+
+	is($stray_status, 0, 'an unregistered batch consumer is no longer seen') or diag($stray_output);
+	is(scalar(_passed($stray_output)), 3, 'all three checks pass') or diag($stray_output);
+	unlike($stray_output, qr/Widget\/Batch\.pm|unregistered consumers/,
+		'the batch consumer is never named') or diag($stray_output);
+
+	my ($bad_status, $bad_output) = _check(_fixture({
+		'Widget-Maker/lib/Widget/Maker.pm' => $PRODUCER_WITH_BATCH,
+		'Widget-User/lib/Widget/Batch.pm'  => $BATCH_CONSUMER_READING_COLOUR,
+	}), consumers => {
+		'Widget-User/lib/Widget/User.pm'  => { may_rely_on => {} },
+		'Widget-User/lib/Widget/Batch.pm' => { may_rely_on => {} },
+	}, mutation => $NO_BATCH_METHOD);
+
+	is($bad_status, 0, 'a bad read from a batch is no longer seen') or diag($bad_output);
+	is(scalar(_passed($bad_output)), 3, 'all three checks pass') or diag($bad_output);
+	# The file is still registered, so it is read and passes; what has gone is
+	# the read that made it fail.
+	unlike($bad_output, qr/reads 'colour'/,
+		'the batch consumer\'s read is never found') or diag($bad_output);
+};
+
+subtest 'mutation: a batch read as a result is caught' => sub {
+	my ($status, $output) = _check(_fixture({
+		'Widget-Maker/lib/Widget/Maker.pm' => $PRODUCER_WITH_BATCH,
+		'Widget-User/lib/Widget/Batch.pm'  => $BATCH_CONSUMER_READING_COLOUR,
+	}), consumers => {
+		'Widget-User/lib/Widget/User.pm'  => { may_rely_on => {} },
+		'Widget-User/lib/Widget/Batch.pm' => { may_rely_on => {} },
+	}, mutation => $BATCH_IS_A_RESULT);
+
+	isnt($status, 0, 'the contract failed');
+	# The variable bound from geocode_many() is a batch, so its counts are not
+	# fields of a result; treat it as one and the count is read as a key.
+	like($output, qr/Widget-User\/lib\/Widget\/Batch\.pm line \d+ in show\(\) reads 'lookups' \(key\) - no producer in this workspace ever sets it/,
+		'the batch count is named as a read of a result') or diag($output);
+	_no_other_failures($output, $CHECKS[1]);
 };
 
 done_testing();

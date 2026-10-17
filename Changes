@@ -1,7 +1,28 @@
 Revision history for Test::Consumer::Contract
 
+0.02
+	- Discovery now sees extensionless programs.  A file with no extension and a
+	  shebang is a consumer like any other, whether it lives in bin/ or at the
+	  distribution root: a script can hold the same geocoding loop as the module
+	  beside it, and the reader/producer contract used to walk past both
+	  HTML-Genealogy-Map/ged2map and the root of a distribution entirely.
+	- geocode_many() is a producing method.  A variable bound from a batch is not
+	  a result - its counts are not fields of one - while a value taken out of the
+	  batch is, so the reads off that value are checked.  Database::BI's place
+	  column resolution was invisible until this: it reads the position out of a
+	  batch and nothing else.
+	- t/contract.t proves each capability by mutation.  With the shebang rule
+	  removed an unregistered program is invisible; with batch support removed
+	  neither geocode_many() failure is found; and with the batch treated as a
+	  result its own count is reported as a read ('lookups').  Each mutation runs
+	  the same fixture in a subprocess with the checker patched, so the new tests
+	  are shown to fail because of the capability and not by accident.
+	- workspace_present() answers before a check has run.  It read the cache of
+	  missing siblings directly instead of filling it, and died on an undefined
+	  array reference the first time it was asked.
+
 0.01	Fri Oct 16 08:52:09 PM EDT 2026
 	- First version, lifted from the reader/producer contract that lived inside
 	  Geo-Coder-Free/t/consumer-contract.t, so any distribution in the workspace
-	  can declare its producer keys and registered consumers and get the same
+	  can declare its own producer keys and registered consumers and get the same
 	  three checks.

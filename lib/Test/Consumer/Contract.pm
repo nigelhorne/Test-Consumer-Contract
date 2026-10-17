@@ -61,7 +61,9 @@ longer read is reported as stale, so the registry keeps describing the code.
 
 Files in sibling distributions that receive a result but are named in neither
 C<consumers> nor C<ignored> fail the check, so a new consumer cannot slip past
-check 2 unnoticed.
+check 2 unnoticed.  A consumer is not necessarily a module: a program without an
+extension is discovered too, when it starts with a shebang, because a script can
+hold the same reader as the module beside it.
 
 =item 4. the accessor lists match the value object, in both directions
 
@@ -104,7 +106,7 @@ use File::Spec;
 
 our @EXPORT_OK = qw(run_consumer_contract);
 
-our $VERSION = '0.01';
+our $VERSION = '0.02';
 
 # ---------------------------------------------------------------------------
 # The contract
@@ -113,7 +115,7 @@ our $VERSION = '0.01';
 my @OPTIONS = qw(
 	dist_root workspace include source value_object guaranteed conditional
 	producers workspace_producers consumers ignored accessors not_accessors
-	inspection methods require_workspace
+	inspection methods batch_methods require_workspace
 );
 
 =head2 B<new>
@@ -166,9 +168,20 @@ in C<accessors> would.
 
 =item C<methods>
 
-The calls that hand a result to the caller; C<geocode> and C<reverse_geocode> by
-default.  A variable bound from one of these is followed, as is a variable passed
-to a sub as its first parameter.
+The calls that hand a result to the caller; C<geocode>, C<reverse_geocode> and
+C<geocode_many> by default.  A variable bound from one of these is followed, as
+is a variable passed to a sub as its first parameter.
+
+C<geocode_many> returns a batch rather than one result: its keys are the results,
+plus counts about the batch itself.  A variable bound from a batch method is
+therefore not treated as a result - C<< $batch->{'lookups'} >> is not a read of
+one - while C<< my $point = $batch->{$value} >> makes C<$point> a result, so the
+reads off it are checked like any other consumer's.
+
+=item C<batch_methods>
+
+The producing methods that return a batch of results rather than one result;
+C<geocode_many> by default.  A variable bound from one is a batch, not a result.
 
 =item C<require_workspace>
 
@@ -211,7 +224,8 @@ sub new
 		accessors           => $spec{'accessors'} || [],
 		not_accessors       => $spec{'not_accessors'} || {},
 		inspection          => $spec{'inspection'} || [],
-		methods             => $spec{'methods'} || [qw(geocode reverse_geocode)],
+		methods             => $spec{'methods'} || [qw(geocode reverse_geocode geocode_many)],
+		batch_methods       => $spec{'batch_methods'} || [qw(geocode_many)],
 		require_workspace   => $spec{'require_workspace'} || [],
 	}, $class;
 
@@ -282,7 +296,11 @@ sub workspace_present
 {
 	my $self = shift;
 
-	return @{$self->{'missing_siblings'}} == 0;
+	# Asked through the cache-filling method: the cache is only built when a
+	# check first needs it, and reading the slot directly found nothing there.
+	my @missing = $self->_missing_siblings();
+
+	return @missing == 0;
 }
 
 sub _missing_siblings
@@ -469,16 +487,32 @@ sub _line_number
 	return 1 + ($prefix =~ tr/\n//);
 }
 
-# The calls that hand a result to a variable, longest name first so that
-# 'reverse_geocode' is not matched as 'geocode'.
+# An alternation of method names, longest first so that 'reverse_geocode' is not
+# matched as 'geocode', and 'geocode_many' not as 'geocode'.
+sub _alternation
+{
+	my ($self, $cache_key, $names) = @_;
+
+	return $self->{$cache_key} //= do {
+		my @names = sort { length($b) <=> length($a) } @{$names};
+		qr/(?:@{[ join('|', map { quotemeta($_) } @names) ]})/;
+	};
+}
+
+# The calls that hand one result to a variable.
 sub _methods_re
 {
 	my $self = shift;
 
-	return $self->{'methods_re'} //= do {
-		my @methods = sort { length($b) <=> length($a) } @{$self->{'methods'}};
-		qr/(?:@{[ join('|', map { quotemeta($_) } @methods) ]})/;
-	};
+	return $self->_alternation('methods_re', $self->{'methods'});
+}
+
+# The calls that hand a batch of results to a variable.
+sub _batch_methods_re
+{
+	my $self = shift;
+
+	return $self->_alternation('batch_methods_re', $self->{'batch_methods'});
 }
 
 sub _sub_ranges
@@ -530,10 +564,28 @@ sub reads_of_results
 	my $text = shift;
 
 	my $geocode = $self->_methods_re();
+	my $batch   = $self->_batch_methods_re();
+
+	# A batch - geocode_many() - is a hash of results with counts about the batch
+	# beside them, so it is not one result: the variable is noted separately and
+	# its direct keys are not read as fields of a result.
+	my %is_batch;
+	while($text =~ /(?:my|our|local)?\s*(\$[A-Za-z_]\w*)\s*=\s*[^;{}]*?->$batch\s*\(/g) {
+		$is_batch{$1} = 1;
+	}
 
 	my %bound;
 	while($text =~ /(?:my|our|local)?\s*(\$[A-Za-z_]\w*)\s*=\s*[^;{}]*?->$geocode\s*\(/g) {
-		$bound{$1} = 1;
+		$bound{$1} = 1 unless $is_batch{$1};
+	}
+
+	# The values of a batch are results: selecting one makes the variable it is
+	# put in a result.  The selector may be a word key or a variable holding one.
+	for my $batch_var (sort keys %is_batch) {
+		my $b = quotemeta($batch_var);
+		while($text =~ /(?:my|our|local)?\s*(\$[A-Za-z_]\w*)\s*=\s*[^;{}]*?$b\s*->\s*\{\s*(?:\$[A-Za-z_]\w*|['"]?\w+['"]?)\s*\}/g) {
+			$bound{$1} = 1 unless $is_batch{$1};
+		}
 	}
 
 	my @ranges = $self->_sub_ranges($text);
@@ -561,6 +613,7 @@ sub reads_of_results
 
 	my @reads;
 	for my $var (sort keys %bound) {
+		next if $is_batch{$var};
 		my $v = quotemeta($var);
 		while($text =~ /$v\s*->\s*\{\s*['"]?(\w+)['"]?\s*\}/g) {
 			my $at = pos($text);
@@ -691,14 +744,43 @@ sub _workspace_sources
 					my $path = $File::Find::name;
 					$File::Find::prune = 1 if(-d $path && $self->_skipped_dir($path));
 					return unless -f $path;
-					return unless $path =~ /\.(?:pm|t|pl|PL|pm6)$/;
+					return unless $path =~ /\.(?:pm|t|pl|PL|pm6)$/ || $self->_program($path);
 					push @files, $self->_ported(File::Spec->abs2rel($path, $self->{'workspace'}));
 				},
 			}, $root);
 		}
+
+		# Programs at the distribution root.  A program does not need an extension
+		# or a bin/ directory to be one - ged2map is at the root of
+		# HTML-Genealogy-Map - and the geocoding loop inside it is the same code
+		# as the one in lib/, so it is discovered like any other consumer.
+		for my $entry (_children($dir)) {
+			my $path = File::Spec->catfile($dir, $entry);
+			next unless -f $path && $self->_program($path);
+			push @files, $self->_ported(File::Spec->abs2rel($path, $self->{'workspace'}));
+		}
 	}
 
 	return @files;
+}
+
+# A file that is a program rather than a document.  There is no extension to
+# recognise it by, and the executable bit is advisory where the platform has
+# one at all (on Windows it is true for most files), so the file is asked what
+# it is: a program announces itself with a shebang.  README, Changes, LICENSE
+# and cpanfile have no extension either, and none of them starts with '#!'.
+sub _program
+{
+	my (undef, $path) = @_;
+
+	my $name = basename($path);
+	return 0 if($name =~ /\A\./ || $name =~ /\./);
+
+	open(my $fh, '<', $path) or return 0;
+	my $magic = <$fh> // '';
+	close($fh);
+
+	return $magic =~ /\A#!/ ? 1 : 0;
 }
 
 # A path spelled the way the contract spells paths: relative to the workspace,
@@ -875,6 +957,10 @@ stored in a hash, returned, or passed through two helpers is not followed.
 =item * Discovery requires the file to name the source distribution.  A consumer
 that is handed results without naming the distribution is not picked up; add it
 to C<consumers> by hand.
+
+=item * Extensionless files are discovered by their shebang.  A program without
+one - a compiled binary, a file run through an explicit interpreter - is not
+seen; register it by hand.
 
 =item * Files in the C<dist_root> distribution are not scanned for consumption -
 its own sources are treated as the producer.  A consumer that lives in the

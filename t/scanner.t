@@ -11,6 +11,9 @@ use warnings;
 use FindBin qw($Bin);
 use lib "$Bin/../lib";
 
+use File::Path qw(make_path);
+use File::Spec;
+use File::Temp qw(tempdir);
 use Test::Most;
 use Test::Consumer::Contract;
 
@@ -102,6 +105,66 @@ subtest 'a path is judged the same whatever separator it is written with' => sub
 		'a platform path is spelled the way the contract spells files');
 	is($contract->_ported('Widget-User/lib/Widget/User.pm'), 'Widget-User/lib/Widget/User.pm',
 		'and one already spelled that way is left alone');
+};
+
+subtest 'a result taken out of a batch is followed, and the batch itself is not' => sub {
+	my @reads = $contract->reads_of_results(<<'SOURCE');
+my $batch = $geocoder->geocode_many(['London']);
+my $count = $batch->{'lookups'};
+my $point = (ref($batch) eq 'HASH') ? $batch->{'London'} : undef;
+_coordinates($point);
+
+sub _coordinates
+{
+	my $point = shift;
+
+	return $point->{'lat'};
+}
+SOURCE
+
+	my @keys = map { $_->[0] } @reads;
+	is_deeply(\@keys, ['lat'], 'only the read off the result is found')
+		or diag(explain(\@reads));
+	is($reads[0][3], '_coordinates', 'and it was followed into the helper it was passed to');
+};
+
+subtest 'a program is recognised by its shebang, not by a bin directory' => sub {
+	my $dir = tempdir(CLEANUP => 1);
+
+	my $program = File::Spec->catfile($dir, 'map-events');
+	open(my $out, '>', $program) or die "Cannot write $program: $!";
+	print {$out} "#!/usr/bin/env perl\n\nprint \"hi\\n\";\n";
+	close($out) or die "Cannot close $program: $!";
+
+	my $document = File::Spec->catfile($dir, 'Changes');
+	open(my $doc, '>', $document) or die "Cannot write $document: $!";
+	print {$doc} "Revision history\n\n0.01  the first version\n";
+	close($doc) or die "Cannot close $document: $!";
+
+	ok($contract->_program($program), 'an extensionless file that starts with #! is a program');
+	ok(!$contract->_program($document), 'an extensionless document is not');
+	ok(!$contract->_program(__FILE__), 'and a file with an extension is not one of these');
+};
+
+subtest 'workspace_present answers before a check has needed the cache' => sub {
+	my $dir = tempdir(CLEANUP => 1);
+	make_path(File::Spec->catdir($dir, 'Widget-User'));
+
+	my $present = Test::Consumer::Contract->new(
+		source            => 'Widget::Maker',
+		guaranteed        => [],
+		workspace         => $dir,
+		require_workspace => ['Widget-User'],
+	);
+	ok($present->workspace_present(), 'a checkout that is there');
+
+	my $missing = Test::Consumer::Contract->new(
+		source            => 'Widget::Maker',
+		guaranteed        => [],
+		workspace         => $dir,
+		require_workspace => ['No-Such-Distribution'],
+	);
+	ok(!$missing->workspace_present(), 'and one that is not');
 };
 
 subtest 'a bare statement is not mistaken for a bound result' => sub {
