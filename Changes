@@ -1,6 +1,6 @@
 Revision history for Test::Consumer::Contract
 
-0.02
+0.02	Sat Oct 17 08:51:01 AM EDT 2026
 	- Discovery now sees extensionless programs.  A file with no extension and a
 	  shebang is a consumer like any other, whether it lives in bin/ or at the
 	  distribution root: a script can hold the same geocoding loop as the module
