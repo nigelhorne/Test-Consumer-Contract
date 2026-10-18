@@ -15,7 +15,7 @@ use warnings;
 use FindBin qw($Bin);
 use lib "$Bin/../lib";
 
-use Errno qw(ENOENT ENOTDIR);
+use Errno qw(EINVAL ENOENT ENOTDIR);
 use File::Spec;
 use File::Temp qw(tempdir);
 use POSIX qw(setlocale LC_ALL);
@@ -44,12 +44,15 @@ foreach my $locale (@LOCALES) {
 		note("LC_ALL=$locale gives the locale '$in_force'");
 
 		my $enoent = do { local $! = ENOENT; "$!" };
-		my $enotdir = do { local $! = ENOTDIR; "$!" };
+		# Opening a plain file as a directory is ENOTDIR on POSIX systems but
+		# EINVAL on Windows.  The module reports whichever the OS gave, so
+		# either text is right; both are still taken from Perl's own $!.
+		my $not_a_dir = join('|', map { local $! = $_; quotemeta("$!") } (ENOTDIR, EINVAL));
 
 		throws_ok { Test::Consumer::Contract->new(%MINIMAL, dist_root => $missing) }
 			qr/dist_root '\Q$missing\E' is not a directory: \Q$enoent\E/, 'a root that is not there';
 		throws_ok { Test::Consumer::Contract->new(%MINIMAL, workspace => $file) }
-			qr/workspace '\Q$file\E' is not a directory: \Q$enotdir\E/, 'a root that is a file';
+			qr/workspace '\Q$file\E' is not a directory: (?:$not_a_dir)/, 'a root that is a file';
 
 		# The same words reach a check's diagnostic, through the reader the
 		# checks share.  White-box: the reader is private.

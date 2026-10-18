@@ -4,7 +4,7 @@ Test::Consumer::Contract - check that code reading a result only reads the field
 
 ## Version
 
-Version 0.04
+Version 0.03
 
 ## Synopsis
 

@@ -1,12 +1,45 @@
 package Test::Consumer::Contract;
 
+use 5.014;
+use strict;
+use warnings;
+
+# Sub::Private reads its mode as it wraps each :Private sub, at CHECK time, so
+# enforce mode has to be chosen before the module is loaded.  Enforce mode is
+# the one that works with method calls ($self->_helper).
+BEGIN { $Sub::Private::config{'mode'} = 'enforce' }
+
+use autodie qw(:all);
+use Carp qw(croak confess);
+use Cwd qw(abs_path getcwd);
+use Exporter 'import';
+use File::Basename qw(basename dirname);
+use File::Find ();
+use File::Spec;
+use List::Util qw(first);
+use Module::Runtime qw(is_module_name module_notional_filename require_module);
+use Params::Get qw(get_params);
+use Params::Validate::Strict qw(validate_strict);
+use Readonly;
+use Return::Set qw(set_return);
+use Scalar::Util qw(blessed looks_like_number);
+use Sub::Private;
+use Sub::Protected;
+use Test::More;
+use Text::Balanced qw(extract_bracketed);
+use lib ();
+
+our @EXPORT_OK = qw(run_consumer_contract);
+
+our $VERSION = '0.03';
+
 =head1 NAME
 
 Test::Consumer::Contract - check that code reading a result only reads the fields that are always there
 
 =head1 VERSION
 
-Version 0.04
+Version 0.03
 
 =head1 SYNOPSIS
 
@@ -351,39 +384,6 @@ warning unless its output handles have an encoding layer:
 =back
 
 =cut
-
-use 5.014;
-use strict;
-use warnings;
-
-# Sub::Private reads its mode as it wraps each :Private sub, at CHECK time, so
-# enforce mode has to be chosen before the module is loaded.  Enforce mode is
-# the one that works with method calls ($self->_helper).
-BEGIN { $Sub::Private::config{'mode'} = 'enforce' }
-
-use autodie qw(:all);
-use Carp qw(croak confess);
-use Cwd qw(abs_path getcwd);
-use Exporter 'import';
-use File::Basename qw(basename dirname);
-use File::Find ();
-use File::Spec;
-use List::Util qw(first);
-use Module::Runtime qw(is_module_name module_notional_filename require_module);
-use Params::Get qw(get_params);
-use Params::Validate::Strict qw(validate_strict);
-use Readonly;
-use Return::Set qw(set_return);
-use Scalar::Util qw(blessed looks_like_number);
-use Sub::Private;
-use Sub::Protected;
-use Test::More;
-use Text::Balanced qw(extract_bracketed);
-use lib ();
-
-our @EXPORT_OK = qw(run_consumer_contract);
-
-our $VERSION = '0.03';
 
 # ---------------------------------------------------------------------------
 # Constants and configuration
@@ -788,7 +788,7 @@ sub new
 
 	# Params::Get accepts a list of pairs or one hashref, so a declaration can
 	# be written either way.  An odd-length list is its error to report.
-	my $spec = eval { get_params(undef, @_) } // {};
+	my $spec = eval { get_params(undef, \@_) } // {};
 	$class->_croak('option.invalid', { error => _first_line($@) }) if($@);
 
 	# A misspelt option fails before anything else: a declaration that quietly
@@ -922,7 +922,8 @@ sub _assert_directory :Private
 	my ($class, $option, $path) = @_;
 
 	# opendir under autodie throws an exception that carries errno, so the
-	# message says ENOENT or ENOTDIR in the words of the platform.
+	# message says ENOENT or ENOTDIR (EINVAL on Windows) in the words of the
+	# platform.
 	my $opened = eval { opendir(my $dh, $path); closedir($dh); 1 };
 	$class->_croak('option.directory', { option => $option, path => $path, error => _os_error($@) })
 		unless($opened);
