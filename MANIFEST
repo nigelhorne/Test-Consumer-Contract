@@ -8,4 +8,7 @@ README.md
 t/00-load.t
 t/changes-version.t
 t/contract.t
+t/i18n.t
+t/locales.t
+t/options.t
 t/scanner.t

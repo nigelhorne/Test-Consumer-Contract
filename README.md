@@ -12,6 +12,9 @@ use Test::Consumer::Contract qw(run_consumer_contract);
 
 run_consumer_contract(
     source        => 'Widget::Maker',
+    # Required: the producing calls, as this producer spells them.  Nothing
+    # in the checker knows what a geocoder looks like.
+    methods       => [qw(make build)],
     value_object  => {
         class   => 'Widget',
         from    => { latitude => 1, longitude => 2 },
@@ -80,6 +83,26 @@ CPAN-style install they skip with a diagnostic and only check 1 runs.  Check 4
 needs the value object's own file, which `include` puts in reach.  This is a
 static, lexical check: it reads source, it does not run the producer.
 
+## The rules, and the tests that prove them
+
+Everything check 2 does beyond reading a file is a rule of the scanner, and each
+rule is named in the inventory the module owns: one name per rule, with the sub
+the rule is exercised through.
+
+```perl
+my %seam = Test::Consumer::Contract->scanner_capabilities();
+```
+
+`t/contract.t` runs a mutation subtest for every name in that list - the rule put
+back the way it was before it was written, in the subprocess the scenario runs
+in, with the failure it used to let through shown to come back - and then fails
+if any rule in the inventory has no such subtest, or if a mutation names a rule
+the inventory does not have, or if the sub a row names is not one the module
+defines.  A rule that nobody has shown catches anything is a rule that may be
+doing nothing, so adding a behaviour to the scanner means adding its failure and
+its mutation in the same change.  The subtests all go through one helper, so a
+mutation cannot be written in a way the guard does not see.
+
 ## Requirements
 
 The caller must load a test module ([Test::Most](https://metacpan.org/pod/Test%3A%3AMost) is what this module uses) and
@@ -88,7 +111,7 @@ subtests but does not end the plan.
 
 ### **New**
 
-Takes the declaration above as a list.  `source` and `guaranteed` are
+Takes the declaration above as a list.  `source`, `guaranteed` and `methods` are
 required; every other option has a default:
 
 - `dist_root`
@@ -134,20 +157,47 @@ required; every other option has a default:
 
 - `methods`
 
-    The calls that hand a result to the caller; `geocode`, `reverse_geocode` and
-    `geocode_many` by default.  A variable bound from one of these is followed, as
-    is a variable passed to a sub as its first parameter.
+    Required.  The calls that hand a result to the caller, as your producer spells
+    them - `[qw(geocode reverse_geocode)]` for a geocoder, `[qw(fetch scan)]` for a
+    store.  There is no default: the checker cannot guess what your producer calls
+    its lookups, and a name it guessed would quietly find nothing.  A variable
+    bound from one of these is followed, as is a variable passed to a sub as its
+    first parameter.
 
-    `geocode_many` returns a batch rather than one result: its keys are the results,
+    A method named in `batch_methods` instead returns a batch rather than one
+    result: its keys are the results,
     plus counts about the batch itself.  A variable bound from a batch method is
     therefore not treated as a result - `$batch->{'lookups'}` is not a read of
-    one - while `my $point = $batch->{$value}` makes `$point` a result, so the
-    reads off it are checked like any other consumer's.
+    one - while a value taken out of it is, wherever it is put: `my $point =
+    $batch->{$value}` makes `$point` a result, `my %points = map { $_ =>
+    $batch->{$_} } @values` makes a read through `$points{$value}` a read of a
+    result, and a sub that does `return $batch->{$value}` hands one back to its
+    callers, who are then read like any other consumer's.
 
 - `batch_methods`
 
     The producing methods that return a batch of results rather than one result;
-    `geocode_many` by default.  A variable bound from one is a batch, not a result.
+    none by default.  A variable bound from one is a batch, not a result.
+
+- `list_methods`
+
+    The producing methods that hand back a list of results rather than one - a
+    report's `results()`, the checks a runner ran; none by default.  The reader
+    takes a result out of the list, and the variable that takes it is a result
+    like any other: the loop variable of `for my $entry (@{ $report->results() })`,
+    of a list assigned from that call first, and the topic of a `map` or `grep`
+    block over it.
+
+- `own_consumers`
+
+    True when the distribution being checked is one of its own value object's
+    readers, which is how a value object that is a class in the distribution
+    making it is read; false by default.  Its `lib`, `bin` and `scripts` are then
+    scanned for consumers and discovered like a sibling's, but not its `t` and
+    `xt`: its tests are the proof of the value object rather than readers of it,
+    and every one of them reads it.  Its paths are named relative to the
+    distribution, the way a producer's are, so they still point at the right file
+    when the distribution is installed under a versioned directory name.
 
 - `require_workspace`
 
@@ -195,12 +245,21 @@ my @reads = $contract->reads_of_results($stripped_text);
 ```
 
 Every `->{key}` and `->method()` read of a variable that holds a
-result, as `[key, line, kind, sub]`.  A variable holds one if it is bound from a
-`geocode()` or `reverse_geocode()` call, or if it is the first parameter of a
-sub that this file calls with such a variable - so a helper that takes the result
-still counts, whatever it names it.  One level of that is followed, which is
-enough for an adapter; a deeper chain is a sign the read belongs in the
-consumer's registry entry.
+result, as `[key, line, kind, sub]`, in the order the reads appear in the file.
+A variable holds one if it is bound from a call the declaration names in
+`methods`, if it is the parameter a sub takes it in when this file calls that
+sub with such a variable - so a helper that takes the result still counts,
+whatever it names it, whether the helper is written `helper($result)` or
+`$self->_helper($result)` - or if it is bound from a sub that returns a value
+taken out of a batch.  A value out of a batch is a result wherever it is put:
+into a variable of its own, into a hash (a read through `$points{$value}` is
+then a read of a result), or back out of a sub through a `return`.  One level of
+that is followed, which is enough for an adapter; a deeper chain is a sign the
+read belongs in the consumer's registry entry.
+
+An accessor is read with its parentheses or without them - `$result->score()`
+and `$result->score` are the same read - and `can()`, `isa()` and the rest of
+`inspection` are reads too, reported as such rather than as fields.
 
 ### **Documented\_Accessors**
 
@@ -219,17 +278,20 @@ what makes this the list of what is documented rather than of what is compiled.
 ## Limitations
 
 - The scanner is static and lexical.  It follows reads on variables bound
-from a producing call plus one level of call into a helper; a result that is
-stored in a hash, returned, or passed through two helpers is not followed.
+from a producing call plus one level of call into a helper; a single result
+stored in a hash or returned is not followed, and neither is anything passed
+through two helpers.  A value taken out of a `geocode_many()` batch is the
+exception: it is a result wherever a hash or a `return` puts it.
 - Discovery requires the file to name the source distribution.  A consumer
 that is handed results without naming the distribution is not picked up; add it
 to `consumers` by hand.
 - Extensionless files are discovered by their shebang.  A program without
 one - a compiled binary, a file run through an explicit interpreter - is not
 seen; register it by hand.
-- Files in the `dist_root` distribution are not scanned for consumption -
-its own sources are treated as the producer.  A consumer that lives in the
-producing distribution is not discovered.
+- Files in the `dist_root` distribution are not scanned for consumption by
+default - its own sources are treated as the producer.  A consumer that lives in
+the producing distribution is not discovered until the declaration asks for it
+with `own_consumers`, and then its `t` and `xt` are still left out.
 - The producer evidence is static: a producer that sets a key by a route
 the three recognised spellings do not cover is reported as not setting it.
 - `require_workspace` is what tells a missing checkout apart from a
