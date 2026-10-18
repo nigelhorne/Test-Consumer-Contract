@@ -25,6 +25,18 @@ subtest 'a declaration can be a list of pairs or one hashref' => sub {
 	isa_ok(Test::Consumer::Contract->new({ %MINIMAL }), 'Test::Consumer::Contract', 'from a hashref');
 };
 
+subtest 'an optional option given as undef takes its default' => sub {
+	# Stored as undef, these were dereferenced later and run() died with
+	# "Can't use an undefined value as a HASH reference".
+	my $contract = Test::Consumer::Contract->new(%MINIMAL, map { $_ => undef }
+		qw(consumers conditional producers ignored accessors not_accessors messages value_object));
+
+	is_deeply($contract->{'consumers'}, {}, 'a hash option is an empty hash');
+	is_deeply($contract->{'ignored'}, [], 'a list option is an empty list');
+	is($contract->{'value_object'}, undef, 'and value_object stays absent');
+	lives_ok { $contract->i18n('check.producers') } 'the messages default is usable';
+};
+
 subtest 'an option of the wrong type is refused' => sub {
 	throws_ok { Test::Consumer::Contract->new(%MINIMAL, methods => 'geocode') }
 		qr/::new\(\): .*methods/, 'methods has to be a list';

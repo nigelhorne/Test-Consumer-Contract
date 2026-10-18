@@ -35,6 +35,10 @@ Revision history for Test::Consumer::Contract
 	  constructor dies, now fails check 2 rather than being skipped or ending the
 	  test file.  An absent value object is still skipped.
 	- Fixed: an unreadable producer or consumer now says why, with the OS error.
+	- Fixed: an optional option given as undef was stored as undef, and run()
+	  then died; it now takes its default.
+	- POD rewritten in plainer English, with COMMON PITFALLS, ENCODING, a
+	  FORMAL SPECIFICATION section and a STATE DIAGRAM.
 	- Fixed: the accessor check used two different ideas of "documented" for its
 	  two directions; both now use documented_accessors().
 	- new() validates the declaration (Params::Validate::Strict): wrong types,

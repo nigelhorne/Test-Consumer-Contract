@@ -2,130 +2,353 @@ package Test::Consumer::Contract;
 
 =head1 NAME
 
-Test::Consumer::Contract - check a reader against the keys its producer promises
+Test::Consumer::Contract - check that code reading a result only reads the fields that are always there
 
 =head1 VERSION
 
-Version 0.03
+Version 0.04
 
 =head1 SYNOPSIS
 
-A distribution declares what its value object promises, who produces it, who
-reads it, and why each exception is safe:
+=head2 1. The usual case: results are hashes, readers live in other distributions
+
+A geocoder hands back a hash.  C<x> and C<y> are always in it; C<colour> is
+only sometimes there.  This test fails if any reader in the workspace reads
+C<colour> without saying why that is safe.
 
     use Test::Most;
     use Test::Consumer::Contract qw(run_consumer_contract);
 
     run_consumer_contract(
-        source        => 'Widget::Maker',
-        # Required: the calls that hand a result to the caller, as this
-        # producer spells them.  None of them has to be a geocoder.
-        methods       => [qw(make build)],
-        value_object  => {
-            class   => 'Widget',
-            from    => { latitude => 1, longitude => 2 },
-            derives => { x => 1, y => 2 },
-        },
-        guaranteed  => [qw(x y)],
+        source      => 'Widget::Maker',       # readers mention this name
+        methods     => [qw(geocode)],         # the call that returns a result
+        guaranteed  => [qw(x y)],             # always set
         conditional => { colour => 'only the painted path sets it' },
         producers   => { 'lib/Widget/Maker.pm' => [qw(x y colour)] },
-        consumers   => {
-            'Widget-User/lib/Widget/User.pm' => {
-                may_rely_on => {
-                    render => { colour => 'defaults to undef on purpose' },
-                },
-            },
-        },
-        ignored     => [['Widget-List/', 'reads its own normalised output']],
-        accessors   => [qw(x y)],   # documented accessors a consumer may read
-        not_accessors => {          # documented, but not a slot of one result
-            new             => 'the constructor',
-            ACCURACY_LEVELS => 'a class constant',
-        },
-        inspection  => [qw(can isa DOES)],
+        consumers   => { 'Widget-User/lib/Widget/User.pm' => {} },
+        require_workspace => ['Widget-User'],
     );
 
     done_testing();
 
+=head2 2. Allowing one reader to read an optional field
+
+The reader in C<render()> reads C<colour> on purpose, and handles it being
+missing.  Say so, with the reason, under the name of the sub that reads it:
+
+    consumers => {
+        'Widget-User/lib/Widget/User.pm' => {
+            may_rely_on => {
+                render => { colour => 'defaults to undef on purpose' },
+            },
+        },
+    },
+
+=head2 3. Results that are objects with accessor methods
+
+When a result is an object, readers call methods (C<< $entry->memo >>) instead
+of reading hash keys.  Name the methods a reader may call, and let the checker
+compare that list with what the class documents:
+
+    run_consumer_contract(
+        source        => 'Ledger::Entry',
+        methods       => ['Ledger::Entry->new', 'entry'],  # 'Class->new': only this class
+        list_methods  => ['results'],                      # returns a list of results
+        value_object  => {
+            class   => 'Ledger::Entry',
+            from    => { amount => 7 },       # build one like this...
+            derives => { cents => 700 },      # ...and expect these values
+        },
+        guaranteed    => [qw(amount memo cents)],
+        accessors     => [qw(amount memo cents)],
+        not_accessors => { new => 'the constructor' },
+        inspection    => [qw(can isa DOES)],
+        conditional   => { note => 'only some entries carry a note' },
+        include       => ['Ledger-Store/lib'],
+        own_consumers => 1,                   # this distribution reads them too
+        consumers     => { 'Ledger-UI/lib/Ledger/UI.pm' => {} },
+        require_workspace => ['Ledger-UI'],
+    );
+
+=head2 4. A call that returns many results at once
+
+C<geocode_many()> returns one hash: the results under their names, plus counts.
+The counts are not fields of a result, so name the call in C<batch_methods>:
+
+    methods       => [qw(geocode geocode_many)],
+    batch_methods => ['geocode_many'],
+
+=head2 5. Using the scanner yourself
+
+The object's methods can be used outside a test, for example to see what the
+checker finds in one file:
+
+    my $contract = Test::Consumer::Contract->new(
+        source => 'Widget::Maker', methods => ['geocode'], guaranteed => [],
+    );
+    my $code = $contract->strip($source_text);       # drop POD and comments
+    foreach my $read (@{ $contract->reads_of_results($code) }) {
+        my ($key, $line, $kind, $sub) = @{$read};
+        print "line $line, in $sub: reads $key ($kind)\n";
+    }
+
+=head2 6. Changing the wording of the messages
+
+    # For every contract built after this line:
+    $Test::Consumer::Contract::config{'messages'}{'skip.siblings'}
+        = 'Geschwister fehlen: {missing}';
+
+    # For one contract only:
+    run_consumer_contract(%declaration, messages => {
+        'check.producers' => 'les producteurs posent toujours les cles promises',
+    });
+
 =head1 DESCRIPTION
 
-C<run()> runs these checks, each as one subtest, in this order:
+=head2 The problem
+
+One piece of code (the I<producer>) makes a I<result>: a hash or an object
+with named fields.  Other code (the I<consumers>, or readers) reads those
+fields.  Some fields are always set.  Others are set only on some paths - for
+example, only when a lookup found a postcode.
+
+A reader that reads an only-sometimes field works in testing and then fails
+for the one input where the field is missing.  This module finds those reads
+before that happens, by reading the source code of every reader.
+
+=head2 Words used in this document
+
+    producer      code that makes a result (for example geocode())
+    result        the hash or object the producer hands back
+    value object  the class of a result, when the result is an object
+    key, field    one named value in a result: $r->{'x'} or $r->x
+    guaranteed    a key every result has
+    conditional   a key only some results have
+    consumer      a file that reads keys of a result
+    distribution  one project folder, such as Widget-Maker/
+    workspace     the folder that holds several distributions side by side
+    declaration   the options you pass to new() or run_consumer_contract()
+
+A typical workspace:
+
+    workspace/
+        Widget-Maker/       the producer and the value object
+        Widget-User/        a consumer
+        Widget-Contract/    holds t/contract.t, which declares the contract
+                            (this is dist_root; it may also be Widget-Maker)
+
+=head2 The five checks
+
+C<run()> runs these checks.  Each one is a subtest in the TAP output.
 
 =over 4
 
 =item 1. the producers still set the keys the contract claims
 
-Each file named in C<producers> (and C<workspace_producers>) is read and each key
-it is responsible for must still be assigned there, so a producer that quietly
-stops stamping a key fails.  POD and comments are removed first: a key shown in
-a synopsis is documentation of the promise, not the producer keeping it.
+Each file in C<producers> and C<workspace_producers> must still contain an
+assignment to each key listed for it.  POD and comments do not count: a key
+shown in an example is not a key being set.
 
 =item 2. the value object still derives what it promises
 
-When C<value_object> has C<derives>, an object is built from C<from> and each
-derived accessor must return the value given.  A value object that cannot be
-found is skipped; one that is found but does not compile, or whose constructor
-dies, fails.
+Only when C<value_object> has C<derives>.  An object is built from C<from>, and
+each method named in C<derives> must return the value given.  If the class
+cannot be found, this check is skipped.  If the class is found but does not
+compile, or its constructor dies, the check fails.
 
 =item 3. registered consumers read only what every producer sets
 
-Each file named in C<consumers> is scanned for reads of a result.  A read of a
-key in C<guaranteed> is fine; a read of anything else is reported with its file,
-line, sub and the reason the key is a problem, unless the read is registered
-under C<may_rely_on> keyed by the name of the enclosing sub.  An entry that is no
-longer read is reported as stale, so the registry keeps describing the code.
+Each file in C<consumers> is read.  Every read of a result is listed with its
+line and the sub it is in.  Reading a guaranteed key is fine.  Reading any
+other key fails, unless the consumer lists that key in C<may_rely_on> under
+the name of the sub that reads it.  An entry in C<may_rely_on> that the code
+no longer reads also fails, so the list stays true.
 
-=item 4. the accessor lists match the value object, in both directions
+=item 4. the accessor lists match the value object
 
-The value object's documented accessors are its C<=head2> headings and the
-public subs it defines.  Each one the declaration names in C<accessors> or
-C<not_accessors> must be an accessor the value object really has, and - the
-direction that matters when a value object grows - each one the value object
-documents must be accounted for in C<accessors>, C<not_accessors> or
-C<conditional>.  So a value object that gains a documented accessor cannot leave
-the declaration behind: the check fails, naming the accessor and the three
-places to put it.
+Only when C<value_object> is given and C<accessors> or C<not_accessors> is
+not empty.  Every name you list must exist in the class.  And every name the
+class documents (its C<=head2> headings and public subs) must appear in
+C<accessors>, C<not_accessors> or C<conditional>.  So when the class gains a
+new field, this check fails until the contract says what the field is.
 
 =item 5. every discovered consumer is registered
 
-Files in sibling distributions that receive a result but are named in neither
-C<consumers> nor C<ignored> fail the check, so a new consumer cannot slip past
-check 3 unnoticed.  A consumer is not necessarily a module: a program without an
-extension is discovered too, when it starts with a shebang.
+Every C<.pm>, C<.t>, C<.pl> file and every program (a file with no extension
+that starts with C<#!>) in the other distributions of the workspace is read.
+A file that mentions C<source> and reads a result must be listed in
+C<consumers> or C<ignored>.  So a new reader cannot be added without being
+checked.
 
 =back
 
-Checks 3 and 5 need the sibling distributions that share a workspace; when a
-distribution named in C<require_workspace> is absent they skip with a
-diagnostic.  Checks 2 and 4 need the value object's own file, which C<include>
-puts in reach.  This is a static, lexical check: it reads source, it does not
-run the producer.
+Checks 3 and 5 need the other distributions.  If one named in
+C<require_workspace> is missing (for example when the module is installed from
+CPAN), those checks are skipped with a message.
+
+The checker only reads source code.  It never runs the producer or the
+consumers.  See L</LIMITATIONS> for what it cannot see.
 
 =head1 REQUIREMENTS
 
-The caller must load a test module (L<Test::Most> or L<Test::More>) and call
-C<done_testing()> after C<run_consumer_contract()>; this module adds subtests
-but does not end the plan.
+Load a test module (L<Test::Most> or L<Test::More>) before calling, and call
+C<done_testing()> after.  This module adds subtests; it does not start or end
+the test plan.
+
+Perl 5.14 or later.
 
 =head1 CONFIGURATION
 
-C<%Test::Consumer::Contract::config> holds the tunables, in the shape
-L<Object::Configure> produces, so a caller (or a configuration layer) can
-change them before C<new()> is called.  Each object takes a copy when it is
-built, so a later change does not reach an object that already exists.
+C<%Test::Consumer::Contract::config> holds settings shared by all contracts.
+It has the shape L<Object::Configure> produces.  Each contract copies it when
+C<new()> is called, so a change made later does not affect a contract that
+already exists.
 
     Key                Meaning                                      Default
     -----------------  -------------------------------------------  ---------------------
-    sibling_dirs       directories scanned in a sibling dist        lib bin t
-    own_dirs           directories scanned in dist_root             lib bin scripts
-    source_extensions  file extensions that hold Perl source        pm t pl PL pm6
-    skipped_dirs       directory names never descended into         blib xt inc local
+    sibling_dirs       folders read in another distribution         lib bin t
+    own_dirs           folders read in dist_root (own_consumers)    lib bin scripts
+    source_extensions  file extensions that hold Perl code          pm t pl PL pm6
+    skipped_dirs       folder names never entered                   blib xt inc local
                                                                     node_modules .git
                                                                     .build
-    messages           message key => template, over the built-in   (empty)
+    messages           message key => text, replacing the built-in  (empty)
 
-C<new()> does not call L<Object::Configure/configure> itself: that would let an
-environment variable rewrite a contract that is meant to be written in code.
+C<new()> does not call L<Object::Configure/configure> itself, because that
+would let an environment variable change a contract that should be written in
+code.
+
+=head1 COMMON PITFALLS
+
+=over 4
+
+=item * B<undef means "use the default".>
+
+Giving an optional option the value C<undef> is the same as not giving it.
+For a required option (C<source>, C<guaranteed>, C<methods>), C<undef> is an
+error.  Inside lists and hashes, C<undef> is not cleaned up: an C<undef> in
+C<guaranteed> is a key that no read can match.
+
+=item * B<Nothing is merged deeply.>
+
+An option you give replaces the default completely; it is not merged with it.
+A message you give in C<messages> replaces the whole built-in message.  If the
+built-in message has several forms (C<one>, C<other>), your replacement must
+give every form you need, or it is used for all counts.
+
+=item * B<The contract keeps your lists, it does not copy them.>
+
+The arrays and hashes you pass are used as they are.  If you change them after
+C<new()>, the contract changes too.  Build the declaration first, then call
+C<new()>.
+
+=item * B<C<%config> is copied only one level deep.>
+
+A new contract gets its own copy of each list and of the C<messages> hash.
+But a message that is itself a hash of forms is shared.  Replace such an entry;
+do not change it in place.
+
+=item * B<Paths always use C</>.>
+
+Write C<'Widget-User/lib/Widget/User.pm'>, also on Windows.  Consumer and
+ignored paths are relative to the workspace.  Producer paths are relative to
+C<dist_root>, unless they are given in C<workspace_producers>.
+
+=item * B<An C<ignored> rule is a plain prefix.>
+
+C<'Widget-List'> also ignores C<Widget-Listing/>.  End the prefix with C</>
+to ignore exactly one folder.
+
+=item * B<A bare C<new> in C<methods> matches every constructor.>
+
+C<methods =E<gt> ['new']> makes C<< Any::Class->new(...) >> a result.  Write
+C<< 'Widget->new' >> so that only that class counts.
+
+=item * B<Reads outside any sub belong to C<(file scope)>.>
+
+A program's main code is not in a sub.  To allow a read there, use the name
+C<'(file scope)'> in C<may_rely_on>.
+
+=item * B<With an empty C<require_workspace>, check 5 may fail.>
+
+If no other distribution is present, check 5 finds no consumer at all, and
+fails rather than pass on nothing.  Name the distributions your consumers are
+in.
+
+=item * B<Variable names count for the whole file.>
+
+If C<$point> holds a result in one sub, every C<$point> in the same file is
+treated as a result.  Use different names for different things.
+
+=item * B<List context or scalar context.>
+
+C<reads_of_results()> and C<documented_accessors()> return a list when called
+in list context and an array reference in scalar context.
+C<my $n = $contract-E<gt>reads_of_results($t)> is a reference, not a count.
+
+=item * B<C<include> changes C<@INC> for the whole program.>
+
+The last directory listed ends up first.  The change stays after the contract
+is gone.
+
+=item * B<Other tests may match the English text.>
+
+The test names and messages are part of the output.  If you change their
+wording with C<messages>, anything that searches the output for the English
+text will stop matching.
+
+=back
+
+=head1 ENCODING
+
+=over 4
+
+=item * B<Source files are read as bytes.>
+
+Files are not decoded.  Any bytes - UTF-8, Latin-1, emoji - may appear in
+strings, comments and POD of the files that are read; they do no harm.
+
+=item * B<Keys and method names must be ASCII to be found.>
+
+A read is found only when the key or method name is made of C<A-Z>, C<a-z>,
+C<0-9> and C<_>.  A read of C<< $r->{'grosse'} >> is found; a read of a key
+with a non-ASCII letter in it is B<not> found, so it can never fail check 3.
+The same is true of producer keys passed to C<sets_key()> for check 1 when the
+text is bytes and the key is a character string.
+
+=item * B<C<strip()>, C<reads_of_results()> and C<documented_accessors()>
+accept bytes or characters.>
+
+If you pass them text you decoded yourself (for example with
+C<< :encoding(UTF-8) >>), non-ASCII letters count as word characters, and
+non-ASCII keys are found.
+
+=item * B<C<sets_key()> compares the key and the text exactly.>
+
+Give both as bytes, or both as decoded characters.  Mixing them can make a key
+that is in the text appear to be missing.
+
+=item * B<C<source> is compared with the file's bytes.>
+
+Keep it ASCII (a Perl package name always is).
+
+=item * B<Paths should be ASCII.>
+
+Paths are passed to the operating system as they are.  On Unix a non-ASCII
+path works when it is given as UTF-8 bytes.  On Windows non-ASCII paths may not
+be found.
+
+=item * B<Messages may use any Unicode text, including emoji.>
+
+Message templates, reasons in C<conditional>, C<may_rely_on> and C<ignored>,
+and the arguments to C<i18n()> may be any character strings.  When they
+contain characters above 255, Test::Builder prints a C<Wide character>
+warning unless its output handles have an encoding layer:
+
+    binmode(Test::More->builder->$_, ':encoding(UTF-8)')
+        for qw(output failure_output todo_output);
+
+=back
 
 =cut
 
@@ -325,8 +548,6 @@ Readonly::Hash my %SCANNER_RULE_SEAM => (
 # Construction
 # ---------------------------------------------------------------------------
 
-=encoding utf8
-
 =head1 METHODS
 
 =head2 new
@@ -340,7 +561,8 @@ Builds a contract from a declaration, validating it before any check runs.
 =head3 Arguments
 
 A list of pairs, or one hashref.  C<source>, C<guaranteed> and C<methods> are
-required; every other option has a default.
+required; every other option has a default.  An optional option given as
+C<undef> takes its default, as if it had not been given.
 
 =over 4
 
@@ -546,20 +768,6 @@ object.
     "...::new(): dist_root 'X' is not a             An explicit dist_root or workspace does
      directory: <OS error>"                         not exist; the OS error says why.
 
-=head3 FORMAL SPECIFICATION
-
-    ┌─ New ─────────────────────────────────────────────────────
-    │ spec? : OPTION ⇸ VALUE
-    │ contract! : CONTRACT
-    ├───────────────────────────────────────────────────────────
-    │ dom spec? ⊆ KNOWN_OPTIONS
-    │ {source, guaranteed, methods} ⊆ dom spec?
-    │ ∀ o : dom spec? • spec?(o) ∈ TYPE(o)
-    │ ∀ d : {dist_root, workspace} ∩ dom spec? • spec?(d) ∈ DIRECTORY
-    │ contract!.options = DEFAULTS ⊕ spec?
-    │ INC' = rev(includes(spec?)) ⁀ (INC ∖ ran includes(spec?))
-    └───────────────────────────────────────────────────────────
-
 =head3 PSEUDOCODE
 
     normalise the arguments into one hash
@@ -607,9 +815,14 @@ sub new
 
 	my $dist_root = $valid->{'dist_root'} // _default_dist_root();
 
+	# An optional option given as undef means "use the default", the same as
+	# leaving it out: stored as undef, it was dereferenced later and died in
+	# the middle of run().
+	my %given = map { $_ => $valid->{$_} } grep { defined($valid->{$_}) } keys %{$valid};
+
 	my $self = bless {
 		%{_defaults()},
-		%{$valid},
+		%given,
 		dist_root     => $dist_root,
 		dist_name     => basename($dist_root),
 		workspace     => $valid->{'workspace'} // dirname($dist_root),
@@ -795,16 +1008,6 @@ Emits TAP through L<Test::Builder>.  Loads the value object's class.
 
 None of its own: each check's messages are listed in L</DIAGNOSTICS>.
 
-=head3 FORMAL SPECIFICATION
-
-    ┌─ Run ─────────────────────────────────────────────────────
-    │ ΞCONTRACT
-    │ tap! : seq SUBTEST
-    ├───────────────────────────────────────────────────────────
-    │ tap! = producers ⁀ derivation ⁀ consumers ⁀ accessors ⁀ discovery
-    │ #tap! ≤ 5
-    └───────────────────────────────────────────────────────────
-
 =cut
 
 sub run
@@ -859,10 +1062,6 @@ As for L</new>.
 
 Those of L</new>.
 
-=head3 FORMAL SPECIFICATION
-
-    RunConsumerContract ≙ New ⨾ Run
-
 =cut
 
 sub run_consumer_contract
@@ -908,15 +1107,6 @@ Caches the answer in the object.
 =head3 MESSAGES
 
 None.
-
-=head3 FORMAL SPECIFICATION
-
-    ┌─ WorkspacePresent ────────────────────────────────────────
-    │ ΞCONTRACT
-    │ present! : 𝔹
-    ├───────────────────────────────────────────────────────────
-    │ present! ⇔ ran require_workspace ⊆ dirs(workspace)
-    └───────────────────────────────────────────────────────────
 
 =cut
 
@@ -1020,18 +1210,6 @@ None.
                                      programming error and is raised with confess,
                                      so the stack trace shows the caller.
     "...::i18n() needs a 'key'"      The key is missing or undef.
-
-=head3 FORMAL SPECIFICATION
-
-    ┌─ I18n ────────────────────────────────────────────────────
-    │ key? : KEY
-    │ args? : NAME ⇸ VALUE
-    │ text! : seq CHAR
-    ├───────────────────────────────────────────────────────────
-    │ catalogue = BUILTIN ⊕ config.messages ⊕ self.messages
-    │ key? ∈ dom catalogue
-    │ text! = interpolate(choose(catalogue(key?), args?), {package ↦ PACKAGE} ⊕ args?)
-    └───────────────────────────────────────────────────────────
 
 =head3 PSEUDOCODE
 
@@ -1292,19 +1470,6 @@ None.
     "...::sets_key(): <validator message>"       An argument has the wrong type.
     "...::sets_key() needs a 'X'"                An argument is missing or undef.
 
-=head3 FORMAL SPECIFICATION
-
-    ┌─ SetsKey ─────────────────────────────────────────────────
-    │ text? : seq CHAR
-    │ key? : seq₁ CHAR
-    │ sets! : 𝔹
-    ├───────────────────────────────────────────────────────────
-    │ sets! ⇔ (∃ q : {ε, ', "} • q⁀key?⁀q⁀"=>" in text?)
-    │       ∨ (∃ q : {ε, ', "}; op : {"=", "||=", "//="} •
-    │             "->{"⁀q⁀key?⁀q⁀"}"⁀op in text?)
-    │ -- "==" and "=~" are comparisons, not assignments
-    └───────────────────────────────────────────────────────────
-
 =cut
 
 sub sets_key
@@ -1544,17 +1709,6 @@ None.
     -------------------------------------------  ----------------------------------
     "...::strip() needs a 'text'"                The text is missing or undef.
 
-=head3 FORMAL SPECIFICATION
-
-    ┌─ Strip ───────────────────────────────────────────────────
-    │ text?, code! : seq CHAR
-    ├───────────────────────────────────────────────────────────
-    │ let n == #lines(text? before __END__/__DATA__)
-    │ #lines(code!) = n
-    │ ∀ i : 1 ‥ n • lines(code!)(i) ∈ {ε, lines(text?)(i)}
-    │ ∀ i : pod(text?) ∪ comments(text?) • lines(code!)(i) = ε
-    └───────────────────────────────────────────────────────────
-
 =cut
 
 sub strip
@@ -1645,15 +1799,6 @@ None.
 =head3 MESSAGES
 
 None.
-
-=head3 FORMAL SPECIFICATION
-
-    ┌─ ScannerCapabilities ─────────────────────────────────────
-    │ seam! : RULE ⇸ SUBNAME
-    ├───────────────────────────────────────────────────────────
-    │ seam! = SCANNER_RULE_SEAM
-    │ ran seam! ⊆ dom SUBS(Test::Consumer::Contract)
-    └───────────────────────────────────────────────────────────
 
 =cut
 
@@ -1902,15 +2047,32 @@ sub _collect_reads :Private
 
 =head3 Purpose
 
-Finds every C<< ->{key} >> and C<< ->accessor >> read of a variable that holds
-a result.  A variable holds one if it is bound from a call in C<methods>; if it
-is the loop variable or topic over a call in C<list_methods>; if it is a value
-taken out of a batch from a call in C<batch_methods>; if it is bound from a sub
-that returns such a value; or if it is the parameter of a sub that this file
-calls with a variable that already holds one (the second parameter, for a
-method whose first is C<$self>).  A value out of a batch is a result wherever
-it is put: into a variable, into a hash, or back out of a sub through a plain
-C<return>.
+Finds every place in the text that reads a field of a result: a hash key,
+C<< $r->{'key'} >>, or a method call, C<< $r->key >> or C<< $r->key() >>.
+
+First it works out which variables hold a result.  A variable holds a result
+when:
+
+=over 4
+
+=item * it is set from a call named in C<methods>:
+C<< my $r = $maker->geocode(...) >>;
+
+=item * it takes one result at a time from a call named in C<list_methods>:
+C<< for my $r (@{ $report->results }) >>, or C<$_> in a C<map> or C<grep>
+over that call;
+
+=item * it is set from one entry of a batch (a call named in
+C<batch_methods>): C<< my $r = $batch->{$name} >>.  A batch entry also counts
+when it is put into a hash, or returned from a sub - the callers of that sub
+then get results too;
+
+=item * it is the parameter of a sub that this file calls with a result.  For
+a method call (C<< $self->show($r) >>) that is the parameter after C<$self>.
+
+=back
+
+Then it lists every read of those variables.
 
 =head3 Arguments
 
@@ -1956,19 +2118,6 @@ None.
     Message                                      Meaning / Resolution
     -------------------------------------------  ----------------------------------
     "...::reads_of_results() needs a 'text'"     The text is missing or undef.
-
-=head3 FORMAL SPECIFICATION
-
-    ┌─ ReadsOfResults ──────────────────────────────────────────
-    │ ΞCONTRACT
-    │ text? : seq CHAR
-    │ reads! : seq (KEY × ℕ₁ × KIND × SUBNAME)
-    ├───────────────────────────────────────────────────────────
-    │ holds = μ H : ℙ VAR | H = bound(text?) ∪ helpers(text?, H)
-    │ ran reads! = { k, l, kind, s | (∃ v : holds ∖ batches(text?) •
-    │                  read(text?, v, k, kind) at l in s) }
-    │ ∀ i, j : dom reads! | i < j • line(reads!(i)) ≤ line(reads!(j))
-    └───────────────────────────────────────────────────────────
 
 =head3 PSEUDOCODE
 
@@ -2267,17 +2416,6 @@ None.
     Message                                         Meaning / Resolution
     ----------------------------------------------  ----------------------------------
     "...::consumer_path() needs a 'relative'"       The path is missing or undef.
-
-=head3 FORMAL SPECIFICATION
-
-    ┌─ ConsumerPath ────────────────────────────────────────────
-    │ ΞCONTRACT
-    │ rel? : PATH
-    │ path! : PATH
-    ├───────────────────────────────────────────────────────────
-    │ workspace ⁄ rel? ∈ FILES ⇒ path! = workspace ⁄ rel?
-    │ workspace ⁄ rel? ∉ FILES ⇒ path! = dist_root ⁄ rel?
-    └───────────────────────────────────────────────────────────
 
 =cut
 
@@ -2604,16 +2742,6 @@ None.
     -----------------------------------------------  ----------------------------------
     "...::documented_accessors() needs a 'text'"     The text is missing or undef.
 
-=head3 FORMAL SPECIFICATION
-
-    ┌─ DocumentedAccessors ─────────────────────────────────────
-    │ text? : seq CHAR
-    │ names! : seq NAME
-    ├───────────────────────────────────────────────────────────
-    │ ran names! = head2(text?) ∪ { s : subs(text?) | s(1) ≠ '_' }
-    │ names! is sorted ∧ names! ∈ iseq NAME
-    └───────────────────────────────────────────────────────────
-
 =cut
 
 sub documented_accessors
@@ -2831,6 +2959,209 @@ test suite.
 =head1 AUTHOR
 
 Nigel Horne, C<< <njh at nigelhorne.com> >>
+
+=encoding utf8
+
+=head1 FORMAL SPECIFICATION
+
+These schemas use the Z notation.  They say exactly what each public method
+promises, for readers who want that; nothing else in this document depends
+on them.
+
+=head2 Types and state
+
+    [PATH, KEY, NAME, SUBNAME, OPTION, VALUE, RULE, CHAR, VAR]
+    FILES : ℙ PATH                           -- the files that exist
+    KIND ::= key | accessor
+    LOADSTATE ::= loaded | missing | broken
+
+    ┌─ CONTRACT ────────────────────────────────────────────────
+    │ options : OPTION ⇸ VALUE
+    │ dist_root, workspace : PATH
+    │ missing_siblings : ℙ NAME              -- cache, filled on first use
+    │ cached : 𝔹
+    │ class_state : NAME ⇸ LOADSTATE         -- cache of loaded classes
+    ├───────────────────────────────────────────────────────────
+    │ {source, guaranteed, methods} ⊆ dom options
+    │ ∀ o : dom options • options(o) ≠ undef
+    └───────────────────────────────────────────────────────────
+
+    ┌─ InitCONTRACT ────────────────────────────────────────────
+    │ CONTRACT'
+    ├───────────────────────────────────────────────────────────
+    │ ¬ cached' ∧ class_state' = ∅
+    └───────────────────────────────────────────────────────────
+
+=head2 new
+
+    ┌─ New ─────────────────────────────────────────────────────
+    │ spec? : OPTION ⇸ VALUE
+    │ contract! : CONTRACT
+    ├───────────────────────────────────────────────────────────
+    │ dom spec? ⊆ KNOWN_OPTIONS
+    │ {source, guaranteed, methods} ⊆ dom spec?
+    │ ∀ o : dom spec? • spec?(o) ∈ TYPE(o)
+    │ ∀ d : {dist_root, workspace} ∩ dom spec? • spec?(d) ∈ DIRECTORY
+    │ contract!.options = DEFAULTS ⊕ spec?
+    │ INC' = rev(includes(spec?)) ⁀ (INC ∖ ran includes(spec?))
+    └───────────────────────────────────────────────────────────
+
+=head2 run
+
+    ┌─ Run ─────────────────────────────────────────────────────
+    │ ΞCONTRACT
+    │ tap! : seq SUBTEST
+    ├───────────────────────────────────────────────────────────
+    │ tap! = producers ⁀ derivation ⁀ consumers ⁀ accessors ⁀ discovery
+    │ #tap! ≤ 5
+    └───────────────────────────────────────────────────────────
+
+=head2 run_consumer_contract
+
+    RunConsumerContract ≙ New ⨾ Run
+
+=head2 workspace_present
+
+    ┌─ WorkspacePresent ────────────────────────────────────────
+    │ ΞCONTRACT
+    │ present! : 𝔹
+    ├───────────────────────────────────────────────────────────
+    │ present! ⇔ ran require_workspace ⊆ dirs(workspace)
+    └───────────────────────────────────────────────────────────
+
+=head2 i18n
+
+    ┌─ I18n ────────────────────────────────────────────────────
+    │ key? : KEY
+    │ args? : NAME ⇸ VALUE
+    │ text! : seq CHAR
+    ├───────────────────────────────────────────────────────────
+    │ catalogue = BUILTIN ⊕ config.messages ⊕ self.messages
+    │ key? ∈ dom catalogue
+    │ text! = interpolate(choose(catalogue(key?), args?), {package ↦ PACKAGE} ⊕ args?)
+    └───────────────────────────────────────────────────────────
+
+=head2 sets_key
+
+    ┌─ SetsKey ─────────────────────────────────────────────────
+    │ text? : seq CHAR
+    │ key? : seq₁ CHAR
+    │ sets! : 𝔹
+    ├───────────────────────────────────────────────────────────
+    │ sets! ⇔ (∃ q : {ε, ', "} • q⁀key?⁀q⁀"=>" in text?)
+    │       ∨ (∃ q : {ε, ', "}; op : {"=", "||=", "//="} •
+    │             "->{"⁀q⁀key?⁀q⁀"}"⁀op in text?)
+    │ -- "==" and "=~" are comparisons, not assignments
+    └───────────────────────────────────────────────────────────
+
+=head2 strip
+
+    ┌─ Strip ───────────────────────────────────────────────────
+    │ text?, code! : seq CHAR
+    ├───────────────────────────────────────────────────────────
+    │ let n == #lines(text? before __END__/__DATA__)
+    │ #lines(code!) = n
+    │ ∀ i : 1 ‥ n • lines(code!)(i) ∈ {ε, lines(text?)(i)}
+    │ ∀ i : pod(text?) ∪ comments(text?) • lines(code!)(i) = ε
+    └───────────────────────────────────────────────────────────
+
+=head2 scanner_capabilities
+
+    ┌─ ScannerCapabilities ─────────────────────────────────────
+    │ seam! : RULE ⇸ SUBNAME
+    ├───────────────────────────────────────────────────────────
+    │ seam! = SCANNER_RULE_SEAM
+    │ ran seam! ⊆ dom SUBS(Test::Consumer::Contract)
+    └───────────────────────────────────────────────────────────
+
+=head2 reads_of_results
+
+    ┌─ ReadsOfResults ──────────────────────────────────────────
+    │ ΞCONTRACT
+    │ text? : seq CHAR
+    │ reads! : seq (KEY × ℕ₁ × KIND × SUBNAME)
+    ├───────────────────────────────────────────────────────────
+    │ holds = μ H : ℙ VAR | H = bound(text?) ∪ helpers(text?, H)
+    │ ran reads! = { k, l, kind, s | (∃ v : holds ∖ batches(text?) •
+    │                  read(text?, v, k, kind) at l in s) }
+    │ ∀ i, j : dom reads! | i < j • line(reads!(i)) ≤ line(reads!(j))
+    └───────────────────────────────────────────────────────────
+
+=head2 consumer_path
+
+    ┌─ ConsumerPath ────────────────────────────────────────────
+    │ ΞCONTRACT
+    │ rel? : PATH
+    │ path! : PATH
+    ├───────────────────────────────────────────────────────────
+    │ workspace ⁄ rel? ∈ FILES ⇒ path! = workspace ⁄ rel?
+    │ workspace ⁄ rel? ∉ FILES ⇒ path! = dist_root ⁄ rel?
+    └───────────────────────────────────────────────────────────
+
+=head2 documented_accessors
+
+    ┌─ DocumentedAccessors ─────────────────────────────────────
+    │ text? : seq CHAR
+    │ names! : seq NAME
+    ├───────────────────────────────────────────────────────────
+    │ ran names! = head2(text?) ∪ { s : subs(text?) | s(1) ≠ '_' }
+    │ names! is sorted ∧ names! ∈ iseq NAME
+    └───────────────────────────────────────────────────────────
+
+=head1 STATE DIAGRAM
+
+A contract object moves through these states.  Square brackets are states,
+arrows are triggers, and the lines under each arrow are what happens.
+
+    (no object)
+         |
+         | new(%declaration)
+         |   - checks every option; croaks on the first mistake
+         |     (no object is made, @INC is not changed)
+         |   - copies %config; fills in defaults
+         |   - puts 'include' directories at the front of @INC
+         v
+    [CONSTRUCTED]  caches empty: sibling list unknown, no class loaded
+         |
+         |  workspace_present()   - fills the sibling cache, returns 1 or 0
+         |  i18n(), strip(), sets_key(), reads_of_results(),
+         |  documented_accessors(), consumer_path(),
+         |  scanner_capabilities()  - read only; the state does not change
+         |
+         | run()  (or run_consumer_contract(), which is new() then run())
+         v
+    [CHECKING PRODUCERS] ---- no producers declared ----------+
+         |  subtest 1: one ok() per file read and per key     |
+         v                                                    v
+    [CHECKING DERIVATION] --- no 'derives' ------------------+
+         |  loads the value object class (cached)             |
+         |    class file not found  -> subtest skipped        |
+         |    class does not compile -> subtest fails         |
+         |    constructor dies       -> subtest fails         |
+         v                                                    v
+    [CHECKING CONSUMERS] ---- no consumers declared ---------+
+         |  fills the sibling cache if empty                  |
+         |    a required sibling missing -> subtest skipped   |
+         v                                                    v
+    [CHECKING ACCESSORS] ---- no value_object, or no lists --+
+         |  uses the cached class state (skip / fail / run)   |
+         v                                                    v
+    [CHECKING DISCOVERY]  (always runs)
+         |  a required sibling missing -> subtest skipped
+         |  otherwise walks the workspace and reads files
+         v
+    [CHECKED]  run() returns the object
+         |
+         | run() again
+         |   - the same checks run again; the cached sibling list
+         |     and class state are reused, files are read again
+         v
+    [CHECKED]
+
+A failed check never stops the run: each later check still runs.  An error
+in a check's own code (a bug in this module) ends that subtest only.
+
+=cut
 
 =head1 LICENSE AND COPYRIGHT
 
